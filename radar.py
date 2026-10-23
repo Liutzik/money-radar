@@ -252,6 +252,8 @@ def main():
         cmd_collect(cfg, db)
     elif cmd == "watch":
         minutes = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--for" else None
+        if minutes and not (cfg["discord_whales_webhook"] or cfg["discord_bets_webhook"]):
+            minutes = min(minutes, 25)  # no secrets yet: hand over soon so a later run picks them up
         cmd_watch(cfg, db, minutes)
     elif cmd == "report":
         rep = predict.write(db, cfg, int(time.time()), PAGE, REPORT)
