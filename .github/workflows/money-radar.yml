@@ -41,6 +41,7 @@ jobs:
           MONEY_RADAR_BETS_WEBHOOK: ${{ secrets.MONEY_RADAR_BETS_WEBHOOK }}
           MONEY_RADAR_PUBLISH_BRANCH: gh-pages
           GITHUB_TOKEN: ${{ github.token }}
+          TZ: Europe/Chisinau   # the dashboard's days and hours in the owner's local time
         run: python radar.py watch --for 340
 
       - uses: actions/cache/save@v4
