@@ -1,0 +1,50 @@
+name: Money Radar
+
+# Runs nonstop: each run watches for ~5h40m and then exits cleanly; the half-hourly schedule
+# keeps one run queued behind it (the concurrency group never runs two at once), so the next
+# one starts within a minute or two. The database is carried between runs in the Actions cache.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # force-push the dashboard to the gh-pages branch
+
+concurrency:
+  group: money-radar
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/radar.db
+          key: money-radar-db-${{ github.run_id }}
+          restore-keys: money-radar-db-
+
+      - name: Start from the seed database on the very first run
+        run: test -f data/radar.db || cp data/seed.db data/radar.db
+
+      - name: Watch big bets and send Discord alerts
+        env:
+          MONEY_RADAR_WHALES_WEBHOOK: ${{ secrets.MONEY_RADAR_WHALES_WEBHOOK }}
+          MONEY_RADAR_BETS_WEBHOOK: ${{ secrets.MONEY_RADAR_BETS_WEBHOOK }}
+          MONEY_RADAR_PUBLISH_BRANCH: gh-pages
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python radar.py watch --for 340
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/radar.db
+          key: money-radar-db-${{ github.run_id }}

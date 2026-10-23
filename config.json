@@ -1,0 +1,34 @@
+{
+  "discord_whales_webhook": "",
+  "discord_bets_webhook": "",
+  "tiers": {
+    "spin_high_usd": 1000,
+    "buy_high_usd": 10000,
+    "extreme_usd": 50000
+  },
+  "new_release_days": 14,
+  "poll_seconds": 20,
+  "exclude_affiliates": true,
+  "alert_all_engine_games": false,
+  "exclude_studios": [
+    "Paperclip Gaming",
+    "Titan Gaming",
+    "Massive Studios",
+    "Twist Gaming",
+    "Terminal Games",
+    "Uppercut Gaming",
+    "Pocket Play",
+    "Daedalus",
+    "Monolith",
+    "Chaos Theory",
+    "Keyframe Gaming",
+    "Phantom Interactive",
+    "Hyper Play",
+    "Glass Cannon",
+    "Knucklehead Syndicate",
+    "Maverick Studios",
+    "GG Gaming",
+    "Sidequest Studios",
+    "Evoslot"
+  ]
+}

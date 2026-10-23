@@ -1,0 +1,5 @@
+data/radar.db
+data/radar.log
+data/report.json
+dashboard.html
+__pycache__/
