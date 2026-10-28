@@ -117,6 +117,12 @@ def cmd_watch(cfg, db, minutes=None):
     db.commit()
     if reopened:
         log(f"re-checking {reopened} games that an unanswered lookup had marked 'not engine'")
+    # "The Originals" catalog entries are Stake's own games mapped onto engine slugs ("dice")
+    db.execute("UPDATE games SET not_engine=1 WHERE studio='The Originals'")
+    junk = db.execute("DELETE FROM bets WHERE slug IN (SELECT slug FROM games WHERE not_engine=1)").rowcount
+    db.commit()
+    if junk:
+        log(f"dropped {junk} stored bets on games that aren't Stake Engine")
     hooks = ", ".join(f"{c} {'on' if cfg[f'discord_{c}_webhook'] else 'OFF'}" for c in ("whales", "bets"))
     log(f"watching every {cfg['poll_seconds']}s; Discord {hooks}")
     last_report = 0

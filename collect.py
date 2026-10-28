@@ -7,7 +7,7 @@ import classify
 import sc
 import store
 
-CATALOG_EVERY = 12 * 3600
+CATALOG_EVERY = 3600
 AFFILIATES_EVERY = 24 * 3600
 RELEASES_EVERY = 5 * 60
 INFO_RETRY = 30 * 60
@@ -176,6 +176,8 @@ def ingest(db, bet, cfg, affiliates, now):
         return None
     if cfg.get("exclude_affiliates", True) and bet.get("username") and store.account_hash(bet["site"], bet["username"]) in affiliates:
         return None
+    if bet.get("gameKind") == "original":
+        return None  # Stake Originals; the engine catalog wrongly maps "dice" to an engine game
     slug = bet.get("gameSlug") or ""
     g = store.game(db, slug)
     if not g or (unresolved(g) and now - (g["info_at"] or 0) >= UNKNOWN_RETRY):
