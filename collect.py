@@ -16,6 +16,7 @@ PENDING_FOR = 3 * 3600       # how long bets on such a slug wait to be resolved
 MODES_RETRY = 7 * 24 * 3600
 
 _pending = {}  # betKey -> bet, for bets on slugs not yet known to be engine or not
+_unknown_since = {}  # slug -> when its demo page first failed to answer
 
 
 def iso_ts(s):
@@ -35,6 +36,11 @@ def refresh_catalog(db, now, force=False):
     for g in games:
         if g.get("stake_com_slug"):
             store.upsert_game(db, g["stake_com_slug"], catalog_slug=g["slug"], engine_id=g["id"], name=g["name"], studio=g["team_name"])
+    # A game marked "not engine" before it reached the catalog (GRAVE DIGGER was, on 10-25) gets
+    # looked up again now that the catalog lists it; a real other-provider answer re-marks it.
+    for r in db.execute("SELECT * FROM games WHERE not_engine=1 AND catalog_slug IS NOT NULL AND released_at IS NULL").fetchall():
+        store.upsert_game(db, r["slug"], not_engine=None, info_at=None)
+        ensure_game(db, store.game(db, r["slug"]), now)
     db.commit()
     store.meta_set(db, "catalog_at", now)
     return len(games)
@@ -183,7 +189,13 @@ def ingest(db, bet, cfg, affiliates, now):
     if not g or (unresolved(g) and now - (g["info_at"] or 0) >= UNKNOWN_RETRY):
         g = discover(db, slug, now)
     if unresolved(g):
-        _pending.setdefault(bet["betKey"], bet)
+        if now - _unknown_since.setdefault(slug, now) < PENDING_FOR:
+            _pending.setdefault(bet["betKey"], bet)
+            return None
+        # hours without an answer: another provider's game. No name is saved, so the next run
+        # (and the hourly catalog reload, if the catalog ever lists it) looks again.
+        store.upsert_game(db, slug, not_engine=1)
+        db.commit()
         return None
     if not g or g["not_engine"]:
         return None  # not a Stake Engine game

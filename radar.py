@@ -276,7 +276,28 @@ def selftest():
         bad += not ok
         print(f"{'ok ' if ok else 'BAD'} brand-new game with no page yet: bet held, then alerted late once known")
         db.execute("DELETE FROM bets WHERE bet_key='n1'")
+
+        # marked "not engine" before the catalog listed it (GRAVE DIGGER): the catalog reload reopens it
+        store.upsert_game(db, "creative-late-game", not_engine=1, info_at=now - day)
+        sc.engine_games = lambda: [{"stake_com_slug": "creative-late-game", "slug": "late-game", "id": 77, "name": "Late Game", "team_name": "Creative"}]
+        sc.game_info = lambda slug: {"provider": "stake-engine", "name": "Late Game", "studioName": "Creative", "engineSlug": "late-game",
+                                     "gameId": 77, "stakeReleasedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 2 * day))}
+        collect.refresh_catalog(db, now, force=True)
+        lg = {"betKey": "g1", "site": "com", "username": None, "gameSlug": "creative-late-game", "currency": "usdt",
+              "amountUsd": 70000, "payoutUsd": 0, "createdAt": now - 30}
+        row = collect.ingest(db, lg, cfg, affiliates, now)
+        ok = bool(row) and row["tier"] == "extreme" and store.game(db, "creative-late-game")["released_at"]
+        # a slug no lookup ever answers stops being looked up after PENDING_FOR
         sc.game_info = lambda slug: None
+        nobody = {"betKey": "x1", "site": "com", "username": None, "gameSlug": "unknown-provider-game", "currency": "usdt",
+                  "amountUsd": 70000, "payoutUsd": 0, "createdAt": now}
+        collect.ingest(db, nobody, cfg, affiliates, now)
+        collect.ingest(db, dict(nobody, betKey="x2"), cfg, affiliates, now + collect.PENDING_FOR)
+        ok = ok and store.game(db, "unknown-provider-game")["not_engine"] == 1 and "x2" not in collect._pending
+        bad += not ok
+        print(f"{'ok ' if ok else 'BAD'} game marked 'not engine' before the catalog listed it is reopened; never-answered slugs stop after {collect.PENDING_FOR // 3600}h")
+        db.execute("DELETE FROM bets WHERE bet_key='g1'")
+        collect._pending.clear()
 
         late = alerts.dispatch(db, rows, cfg, now + 3600, sender=lambda url, p: True)
         ok = not late["whales"] and not late["bets"]
