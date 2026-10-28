@@ -60,15 +60,30 @@ def cmd_collect(cfg, db):
     collect.refresh_affiliates(db, now)
     log(f"releases: {collect.refresh_releases(db, now, force=True)} recent releases read")
     log(f"release dates: {collect.scan_release_dates(db, cfg, now, budget=4000)} games looked up")
-    log(f"backfill: {collect.backfill(db, cfg, now)} counted bets from recent releases")
+    log(f"backfill: {len(collect.backfill(db, cfg, now))} counted bets from recent releases")
     log(f"poll: {len(collect.poll(db, cfg, now))} new counted bets")
     predict.write(db, cfg, now, PAGE, REPORT)
     log(f"dashboard: {PAGE}")
 
 
-def publish():
-    """On GitHub Actions: force-push dashboard.html as index.html to a one-commit side branch
-    (MONEY_RADAR_PUBLISH_BRANCH). The bonus radar's hourly Pages build copies it in."""
+def bets_export(db, cfg, now, days=14):
+    """Counted bets of the last `days` (no names) plus health numbers, for checking the radar
+    against stakecruncher. Published next to the dashboard as bets.json."""
+    rows = db.execute(
+        "SELECT b.bet_key, b.site, b.slug, g.name, g.studio, b.amount_usd, b.payout_usd, b.kind, b.tier, b.age_days, b.hidden, b.created_at "
+        "FROM bets b JOIN games g ON g.slug=b.slug WHERE b.created_at>=? ORDER BY b.created_at DESC", (now - days * 86400,)
+    ).fetchall()
+    return {
+        "generated_at": now,
+        "overflows": store.meta_get(db, "overflows", 0),
+        "waiting_on_new_games": len(collect._pending),
+        "bets": [dict(r) for r in rows if not collect.excluded_studio(cfg, r["studio"])],
+    }
+
+
+def publish(db, cfg):
+    """On GitHub Actions: force-push the dashboard (index.html) and bets.json to a one-commit
+    branch (MONEY_RADAR_PUBLISH_BRANCH, gh-pages) that GitHub Pages serves."""
     import shutil
     import subprocess
     import tempfile
@@ -79,8 +94,9 @@ def publish():
         return
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(PAGE, Path(tmp) / "index.html")
+        (Path(tmp) / "bets.json").write_text(json.dumps(bets_export(db, cfg, int(time.time()))), encoding="utf-8")
         git = ["git", "-C", tmp, "-c", "user.name=radar-bot", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com"]
-        for args in (["init", "-q", "-b", branch], ["add", "index.html"], ["commit", "-qm", "Money Radar dashboard"],
+        for args in (["init", "-q", "-b", branch], ["add", "index.html", "bets.json"], ["commit", "-qm", "Money Radar dashboard"],
                      ["push", "-qf", f"https://x-access-token:{token}@github.com/{repo}.git", f"{branch}:{branch}"]):
             r = subprocess.run(git + args, capture_output=True, text=True)
             if r.returncode:
@@ -95,6 +111,12 @@ def cmd_watch(cfg, db, minutes=None):
     if not lock:
         log("already running; this copy exits")
         return
+    # Before 10-28, a slug whose demo page didn't answer was marked "not engine" for good (no name
+    # saved with it). Give those another look; a real other-provider answer always carried a name.
+    reopened = db.execute("UPDATE games SET not_engine=NULL, info_at=NULL WHERE not_engine=1 AND name IS NULL").rowcount
+    db.commit()
+    if reopened:
+        log(f"re-checking {reopened} games that an unanswered lookup had marked 'not engine'")
     hooks = ", ".join(f"{c} {'on' if cfg[f'discord_{c}_webhook'] else 'OFF'}" for c in ("whales", "bets"))
     log(f"watching every {cfg['poll_seconds']}s; Discord {hooks}")
     last_report = 0
@@ -107,10 +129,14 @@ def cmd_watch(cfg, db, minutes=None):
                 log(f"{len(rows)} new counted bets")
                 alerts.dispatch(db, rows, cfg, now, say=log)
             collect.scan_release_dates(db, cfg, now, budget=3)
-            collect.backfill(db, cfg, now, limit=1)
+            caught_up = collect.backfill(db, cfg, now, limit=1)
+            if caught_up:  # a new release's first bets: any still fresh alert like live ones
+                alerts.dispatch(db, caught_up, cfg, now, say=log)
             if now - last_report >= REPORT_EVERY:
                 predict.write(db, cfg, now, PAGE, REPORT)
-                publish()
+                publish(db, cfg)
+                log(f"health: $1k feed overflowed {store.meta_get(db, 'overflows', 0)} times so far; "
+                    f"{len(collect._pending)} bets waiting on brand-new games")
                 last_report = now
         except KeyboardInterrupt:
             raise
@@ -119,7 +145,7 @@ def cmd_watch(cfg, db, minutes=None):
             time.sleep(60)
         time.sleep(cfg["poll_seconds"])
     predict.write(db, cfg, int(time.time()), PAGE, REPORT)
-    publish()
+    publish(db, cfg)
     log("time limit reached; handing over to the next run")
 
 
@@ -226,6 +252,26 @@ def selftest():
         ok = not cont["whales"] and len(cont["bets"]) == 1
         bad += not ok
         print(f"{'ok ' if ok else 'BAD'} next $75k bet in the same session: bet alert only, no second whale alert")
+        # a brand-new game with no demo page yet: its bet waits, then alerts (marked late) once known
+        fresh = {"betKey": "n1", "site": "com", "username": None, "gameSlug": "brand-new-game", "currency": "usdt",
+                 "amountUsd": 60000, "payoutUsd": 0, "createdAt": now - 20 * 60}
+        sc.feed = lambda min_usd, game_id=None, limit=100: [fresh]
+        held = collect.poll(db, cfg, now)
+        g = store.game(db, "brand-new-game")
+        ok = not held and "n1" in collect._pending and g["not_engine"] is None
+        sc.feed = lambda min_usd, game_id=None, limit=100: []
+        sc.game_info = lambda slug: {"provider": "stake-engine", "name": "Brand New", "studioName": "Fresh Studio",
+                                     "engineSlug": "brand-new", "gameId": 9, "stakeReleasedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))} \
+            if slug == "brand-new-game" else {"provider": "pragmatic"}
+        resolved = collect.poll(db, cfg, now + collect.UNKNOWN_RETRY)
+        late_sent = alerts.dispatch(db, resolved, cfg, now + collect.UNKNOWN_RETRY, sender=lambda url, p: True)
+        ok = ok and [r["bet_key"] for r in resolved] == ["n1"] and resolved[0].get("late")
+        ok = ok and len(late_sent["bets"]) == 1 and "Spotted late" in late_sent["bets"][0]["embeds"][0]["description"]
+        bad += not ok
+        print(f"{'ok ' if ok else 'BAD'} brand-new game with no page yet: bet held, then alerted late once known")
+        db.execute("DELETE FROM bets WHERE bet_key='n1'")
+        sc.game_info = lambda slug: None
+
         late = alerts.dispatch(db, rows, cfg, now + 3600, sender=lambda url, p: True)
         ok = not late["whales"] and not late["bets"]
         bad += not ok

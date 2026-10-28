@@ -9,9 +9,13 @@ import store
 
 CATALOG_EVERY = 12 * 3600
 AFFILIATES_EVERY = 24 * 3600
-RELEASES_EVERY = 30 * 60
-INFO_RETRY = 24 * 3600
+RELEASES_EVERY = 5 * 60
+INFO_RETRY = 30 * 60
+UNKNOWN_RETRY = 10 * 60      # a slug whose demo page didn't answer yet (brand-new games)
+PENDING_FOR = 3 * 3600       # how long bets on such a slug wait to be resolved
 MODES_RETRY = 7 * 24 * 3600
+
+_pending = {}  # betKey -> bet, for bets on slugs not yet known to be engine or not
 
 
 def iso_ts(s):
@@ -55,7 +59,7 @@ def refresh_releases(db, now, force=False):
         for it in sc.new_releases(page):
             store.upsert_game(
                 db, it["slug"], name=it.get("name"), studio=it.get("studioName"), engine_slug=it.get("engineSlug"),
-                game_id=it.get("gameId"), released_at=iso_ts(it.get("stakeReleasedAt")), info_at=now,
+                game_id=it.get("gameId"), released_at=iso_ts(it.get("stakeReleasedAt")), info_at=now, not_engine=0,
             )
             seen.add(it["slug"])
     db.commit()
@@ -96,10 +100,14 @@ def ensure_game(db, g, now):
     slug = g["slug"]
     if not g["released_at"] and now - (g["info_at"] or 0) >= INFO_RETRY:
         info = sc.game_info(slug) or {}
-        store.upsert_game(
-            db, slug, engine_slug=info.get("engineSlug") or g["engine_slug"], game_id=info.get("gameId") or g["game_id"],
-            released_at=iso_ts(info.get("stakeReleasedAt")), studio=info.get("studioName") or g["studio"], info_at=now,
-        )
+        if info.get("provider") and info["provider"] != "stake-engine":
+            # the engine catalog maps a few casino slugs wrongly ("dice" -> an engine "Plinko Dice")
+            store.upsert_game(db, slug, not_engine=1, info_at=now)
+        else:
+            store.upsert_game(
+                db, slug, engine_slug=info.get("engineSlug") or g["engine_slug"], game_id=info.get("gameId") or g["game_id"],
+                released_at=iso_ts(info.get("stakeReleasedAt")), studio=info.get("studioName") or g["studio"], info_at=now,
+            )
         g = store.game(db, slug)
     if not g["modes"] and now - (g["modes_at"] or 0) >= MODES_RETRY:
         modes = None
@@ -131,19 +139,31 @@ def same_price_blank_spin(db, slug, amount, created, window=15 * 60):
     ).fetchone() is not None
 
 
+def unresolved(g):
+    """Seen in the feed, but stakecruncher hasn't said yet whether it's an engine game."""
+    return g is not None and g["not_engine"] is None and not g["catalog_slug"] and not g["released_at"] and not g["engine_slug"]
+
+
 def discover(db, slug, now):
-    """A slug missing from the engine catalog (EL CARTEL was): ask its demo page once."""
+    """A slug missing from the engine catalog (EL CARTEL was): ask its demo page.
+
+    Only a definite answer naming another provider marks it "not engine". No answer (a game
+    released minutes ago has no demo page yet, or a hiccup) leaves it unresolved; it is asked
+    again every UNKNOWN_RETRY while its bets wait in _pending.
+    """
     if not slug:
         return None
-    info = sc.game_info(slug) or {}
-    if info.get("provider") == "stake-engine":
+    info = sc.game_info(slug)
+    if info and info.get("provider") == "stake-engine":
         store.upsert_game(
             db, slug, name=info.get("name"), studio=info.get("studioName") or info.get("studio"),
             engine_slug=info.get("engineSlug"), game_id=info.get("gameId"),
-            released_at=iso_ts(info.get("stakeReleasedAt")), info_at=now,
+            released_at=iso_ts(info.get("stakeReleasedAt")), info_at=now, not_engine=0,
         )
-    else:
+    elif info and info.get("provider"):
         store.upsert_game(db, slug, name=info.get("name"), not_engine=1, info_at=now)
+    else:
+        store.upsert_game(db, slug, info_at=now)
     db.commit()
     return store.game(db, slug)
 
@@ -157,7 +177,12 @@ def ingest(db, bet, cfg, affiliates, now):
     if cfg.get("exclude_affiliates", True) and bet.get("username") and store.account_hash(bet["site"], bet["username"]) in affiliates:
         return None
     slug = bet.get("gameSlug") or ""
-    g = store.game(db, slug) or discover(db, slug, now)
+    g = store.game(db, slug)
+    if not g or (unresolved(g) and now - (g["info_at"] or 0) >= UNKNOWN_RETRY):
+        g = discover(db, slug, now)
+    if unresolved(g):
+        _pending.setdefault(bet["betKey"], bet)
+        return None
     if not g or g["not_engine"]:
         return None  # not a Stake Engine game
     if excluded_studio(cfg, g["studio"]):
@@ -181,6 +206,7 @@ def ingest(db, bet, cfg, affiliates, now):
     if not store.add_bet(db, row):
         return None
     db.commit()
+    _pending.pop(bet["betKey"], None)
     return dict(row, name=g["name"], studio=g["studio"])
 
 
@@ -192,7 +218,7 @@ def backfill(db, cfg, now, limit=150):
         "SELECT slug, game_id, studio FROM games WHERE game_id IS NOT NULL AND released_at >= ? ORDER BY released_at DESC", (window,)
     ).fetchall() if not excluded_studio(cfg, r["studio"])]
     affiliates = set(store.meta_get(db, "affiliates", []))
-    added = 0
+    added = []  # returned so the caller can alert on any that are still fresh
     for r in rows:
         if r["game_id"] in done:
             continue
@@ -200,21 +226,45 @@ def backfill(db, cfg, now, limit=150):
             break
         limit -= 1
         for bet in sorted(sc.feed(cfg["tiers"]["spin_high_usd"], game_id=r["game_id"]), key=lambda b: b.get("createdAt") or 0):
-            if ingest(db, bet, cfg, affiliates, now):
-                added += 1
+            row = ingest(db, bet, cfg, affiliates, now)
+            if row:
+                added.append(row)
         done.add(r["game_id"])
         store.meta_set(db, "backfilled", sorted(done))
     return added
 
 
 def poll(db, cfg, now):
-    """New qualifying bets from the live big-bet feed."""
+    """New qualifying bets from the live big-bet feeds, plus held bets whose game got resolved.
+
+    The $1k feed holds only the latest 100 bets of $1,000+ on all of Stake (about two minutes,
+    less at peak), so the $10k and $50k feeds are read too: they reach back much further, and an
+    extreme bet can't be pushed out by a burst of small ones. An overflow of the $1k feed (its
+    oldest bet newer than the previous poll) is counted in meta "overflows".
+    """
     affiliates = set(store.meta_get(db, "affiliates", []))
+    tiers = cfg["tiers"]
+    bets = {}
+    last = store.meta_get(db, "last_poll_at")
+    for min_usd in sorted({tiers["spin_high_usd"], tiers["buy_high_usd"], tiers["extreme_usd"]}):
+        feed = sc.feed(min_usd)
+        if min_usd == tiers["spin_high_usd"] and feed and last and min(b.get("createdAt") or now for b in feed) > last:
+            store.meta_set(db, "overflows", (store.meta_get(db, "overflows", 0) or 0) + 1)
+        for b in feed:
+            bets[b["betKey"]] = b
+    store.meta_set(db, "last_poll_at", now)
     out = []
-    for bet in sorted(sc.feed(cfg["tiers"]["spin_high_usd"]), key=lambda b: b.get("createdAt") or 0):
+    for bet in sorted(bets.values(), key=lambda b: b.get("createdAt") or 0):
         row = ingest(db, bet, cfg, affiliates, now)
         if row:
             out.append(row)
+    for key, bet in list(_pending.items()):
+        if now - (bet.get("createdAt") or now) > PENDING_FOR:
+            del _pending[key]
+        elif key not in bets:  # ones still in the feed were tried above
+            row = ingest(db, bet, cfg, affiliates, now)
+            if row:
+                out.append(dict(row, late=True))
     return out
 
 

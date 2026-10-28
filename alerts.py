@@ -17,7 +17,9 @@ import urllib.request
 COLORS = {"high": 0xF5A524, "extreme": 0xE5484D, "whale": 0x3B82F6}
 SITES = {"com": "https://stake.com", "us": "https://stake.us"}
 SESSION_GAP = 20 * 60
-FRESH = 15 * 60  # only alert on bets that landed in the last 15 minutes (not on backfill)
+FRESH = 15 * 60  # only alert on bets that landed in the last 15 minutes (not on old history)
+LATE = 3 * 3600  # bets held while a brand-new game was unknown still alert, marked late
+LATE_NOTE = " Spotted late: the game was too new for stakecruncher's lists when this bet landed."
 
 
 def usd(x):
@@ -71,6 +73,7 @@ def whale_embed(row):
         "description": (
             f"{who} just started playing **{row['name']}** on stake.{row['site']}: "
             f"**{usd(row['amount_usd'])}** per bet ({kind_text(row)}), {tier_text(row).lower()}."
+            + (LATE_NOTE if row.get("late") else "")
         ),
         "fields": [
             {"name": "Studio", "value": row.get("studio") or "?", "inline": True},
@@ -87,7 +90,8 @@ def bet_embed(row):
         "title": f"{tier_text(row)}: {usd(row['amount_usd'])} on {row['name']}"[:256],
         "url": link(row),
         "color": COLORS[row["tier"]],
-        "description": f"{kind_text(row).capitalize()} on stake.{row['site']}. Paid {usd(row['payout_usd'])} ({multi:.2f}x).",
+        "description": f"{kind_text(row).capitalize()} on stake.{row['site']}. Paid {usd(row['payout_usd'])} ({multi:.2f}x)."
+        + (LATE_NOTE if row.get("late") else ""),
         "fields": [
             {"name": "Player", "value": player(row), "inline": True},
             {"name": "Studio", "value": row.get("studio") or "?", "inline": True},
@@ -124,7 +128,7 @@ def send(webhook, payload):
 
 
 def wanted(row, cfg, now):
-    if now - row["created_at"] > FRESH:
+    if now - row["created_at"] > (LATE if row.get("late") else FRESH):
         return False
     if cfg.get("alert_all_engine_games"):
         return True
