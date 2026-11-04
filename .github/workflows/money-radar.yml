@@ -1,15 +1,17 @@
 name: Money Radar
 
-# Runs nonstop: each run watches for ~5h40m and then exits cleanly; the half-hourly schedule
-# keeps one run queued behind it (the concurrency group never runs two at once), so the next
-# one starts within a minute or two. The database is carried between runs in the Actions cache.
+# Runs nonstop: each run watches for ~5h40m and then exits cleanly. As it starts it queues the
+# next run itself (the concurrency group never runs two at once), so the next one starts within a
+# minute or two. GitHub's schedule alone left gaps of over two hours when it ran late, so it is
+# only a backup now. The database is carried between runs in the Actions cache.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write   # force-push the dashboard to the gh-pages branch
+  actions: write    # queue the next run
 
 concurrency:
   group: money-radar
@@ -20,6 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
+      - name: Queue the next run behind this one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run money-radar.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5

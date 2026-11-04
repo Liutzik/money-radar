@@ -118,8 +118,8 @@ def cmd_watch(cfg, db, minutes=None):
     if reopened:
         log(f"re-checking {reopened} games that an unanswered lookup had marked 'not engine'")
     # "The Originals" catalog entries are Stake's own games mapped onto engine slugs ("dice")
-    db.execute("UPDATE games SET not_engine=1 WHERE studio='The Originals'")
-    junk = db.execute("DELETE FROM bets WHERE slug IN (SELECT slug FROM games WHERE not_engine=1)").rowcount
+    db.execute("UPDATE games SET not_engine=? WHERE studio='The Originals'", (collect.OTHER_PROVIDER,))
+    junk = db.execute("DELETE FROM bets WHERE slug IN (SELECT slug FROM games WHERE not_engine=?)", (collect.OTHER_PROVIDER,)).rowcount
     db.commit()
     if junk:
         log(f"dropped {junk} stored bets on games that aren't Stake Engine")
@@ -138,6 +138,10 @@ def cmd_watch(cfg, db, minutes=None):
             caught_up = collect.backfill(db, cfg, now, limit=1)
             if caught_up:  # a new release's first bets: any still fresh alert like live ones
                 alerts.dispatch(db, caught_up, cfg, now, say=log)
+            swept = collect.sweep(db, cfg, now)  # bets the busy $1k feed dropped
+            if swept:
+                log(f"{len(swept)} counted bets found in a new release's own feed")
+                alerts.dispatch(db, swept, cfg, now, say=log)
             if now - last_report >= REPORT_EVERY:
                 predict.write(db, cfg, now, PAGE, REPORT)
                 publish(db, cfg)
@@ -278,7 +282,7 @@ def selftest():
         db.execute("DELETE FROM bets WHERE bet_key='n1'")
 
         # marked "not engine" before the catalog listed it (GRAVE DIGGER): the catalog reload reopens it
-        store.upsert_game(db, "creative-late-game", not_engine=1, info_at=now - day)
+        store.upsert_game(db, "creative-late-game", not_engine=1, info_at=now - day, released_at=now - 2 * day)
         sc.engine_games = lambda: [{"stake_com_slug": "creative-late-game", "slug": "late-game", "id": 77, "name": "Late Game", "team_name": "Creative"}]
         sc.game_info = lambda slug: {"provider": "stake-engine", "name": "Late Game", "studioName": "Creative", "engineSlug": "late-game",
                                      "gameId": 77, "stakeReleasedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 2 * day))}
@@ -298,6 +302,18 @@ def selftest():
         print(f"{'ok ' if ok else 'BAD'} game marked 'not engine' before the catalog listed it is reopened; never-answered slugs stop after {collect.PENDING_FOR // 3600}h")
         db.execute("DELETE FROM bets WHERE bet_key='g1'")
         collect._pending.clear()
+
+        # a $2k spin the all-Stake feed dropped is found in its game's own feed by the sweep
+        dropped = {"betKey": "s1", "site": "com", "username": None, "gameSlug": "fresh-studio-new-game", "currency": "usdt",
+                   "amountUsd": 2000, "payoutUsd": 0, "createdAt": now - 120}
+        sc.feed = lambda min_usd, game_id=None, limit=100: [dropped] if game_id == 1 else []
+        store.meta_set(db, "sweep_pos", 0)
+        store.meta_set(db, "sweep_at", 0)
+        swept = collect.sweep(db, cfg, now)
+        ok = [r["bet_key"] for r in swept] == ["s1"]
+        bad += not ok
+        print(f"{'ok ' if ok else 'BAD'} sweep of a new release's own feed finds a bet the busy feed dropped")
+        db.execute("DELETE FROM bets WHERE bet_key='s1'")
 
         late = alerts.dispatch(db, rows, cfg, now + 3600, sender=lambda url, p: True)
         ok = not late["whales"] and not late["bets"]

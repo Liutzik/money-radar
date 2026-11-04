@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS games (
     engine_slug TEXT,           -- verifier slug from the demo page, e.g. ganja-snail
     catalog_slug TEXT,          -- engine catalog slug, e.g. donut-gaming-ganja-snail
     engine_id INTEGER,          -- engine catalog id; higher = listed later
-    not_engine INTEGER,         -- 1 for a looked-up slug from another provider (Hacksaw, Pragmatic ...)
+    not_engine INTEGER,         -- 2: a lookup named another provider (Hacksaw ...); 1: no lookup answered yet
     name TEXT,
     studio TEXT,
     released_at INTEGER,        -- unix seconds, Stake release time

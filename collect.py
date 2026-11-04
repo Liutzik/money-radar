@@ -18,6 +18,12 @@ MODES_RETRY = 7 * 24 * 3600
 _pending = {}  # betKey -> bet, for bets on slugs not yet known to be engine or not
 _unknown_since = {}  # slug -> when its demo page first failed to answer
 
+# games.not_engine: NULL = engine (or not asked yet), 0 = engine for sure, OTHER_PROVIDER = a
+# lookup named another provider, MAYBE_NOT = no lookup ever answered (looked at again later)
+MAYBE_NOT = 1
+OTHER_PROVIDER = 2
+SWEEP_EVERY = 20  # seconds between per-game feed reads of the newest releases
+
 
 def iso_ts(s):
     return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else None
@@ -36,9 +42,9 @@ def refresh_catalog(db, now, force=False):
     for g in games:
         if g.get("stake_com_slug"):
             store.upsert_game(db, g["stake_com_slug"], catalog_slug=g["slug"], engine_id=g["id"], name=g["name"], studio=g["team_name"])
-    # A game marked "not engine" before it reached the catalog (GRAVE DIGGER was, on 10-25) gets
-    # looked up again now that the catalog lists it; a real other-provider answer re-marks it.
-    for r in db.execute("SELECT * FROM games WHERE not_engine=1 AND catalog_slug IS NOT NULL AND released_at IS NULL").fetchall():
+    # A game marked "not engine" without a lookup naming another provider (GRAVE DIGGER was, on
+    # 10-25) is an engine game once the catalog lists it; a real other-provider answer re-marks it.
+    for r in db.execute("SELECT * FROM games WHERE not_engine=? AND catalog_slug IS NOT NULL", (MAYBE_NOT,)).fetchall():
         store.upsert_game(db, r["slug"], not_engine=None, info_at=None)
         ensure_game(db, store.game(db, r["slug"]), now)
     db.commit()
@@ -108,7 +114,7 @@ def ensure_game(db, g, now):
         info = sc.game_info(slug) or {}
         if info.get("provider") and info["provider"] != "stake-engine":
             # the engine catalog maps a few casino slugs wrongly ("dice" -> an engine "Plinko Dice")
-            store.upsert_game(db, slug, not_engine=1, info_at=now)
+            store.upsert_game(db, slug, not_engine=OTHER_PROVIDER, info_at=now)
         else:
             store.upsert_game(
                 db, slug, engine_slug=info.get("engineSlug") or g["engine_slug"], game_id=info.get("gameId") or g["game_id"],
@@ -167,7 +173,7 @@ def discover(db, slug, now):
             released_at=iso_ts(info.get("stakeReleasedAt")), info_at=now, not_engine=0,
         )
     elif info and info.get("provider"):
-        store.upsert_game(db, slug, name=info.get("name"), not_engine=1, info_at=now)
+        store.upsert_game(db, slug, name=info.get("name"), not_engine=OTHER_PROVIDER, info_at=now)
     else:
         store.upsert_game(db, slug, info_at=now)
     db.commit()
@@ -194,7 +200,7 @@ def ingest(db, bet, cfg, affiliates, now):
             return None
         # hours without an answer: another provider's game. No name is saved, so the next run
         # (and the hourly catalog reload, if the catalog ever lists it) looks again.
-        store.upsert_game(db, slug, not_engine=1)
+        store.upsert_game(db, slug, not_engine=MAYBE_NOT)
         db.commit()
         return None
     if not g or g["not_engine"]:
@@ -279,6 +285,34 @@ def poll(db, cfg, now):
             row = ingest(db, bet, cfg, affiliates, now)
             if row:
                 out.append(dict(row, late=True))
+    return out
+
+
+def sweep(db, cfg, now):
+    """Read one recent release's own feed (its last 100 bets of $1k+), in turn, every SWEEP_EVERY.
+
+    At peak the all-Stake $1k feed overflows between polls; a game's own feed reaches back hours,
+    so a $1k-$10k bet pushed out of the big feed is still picked up within a round of the sweep.
+    """
+    if not due(db, "sweep_at", SWEEP_EVERY, now):
+        return []
+    store.meta_set(db, "sweep_at", now)
+    window = now - cfg["new_release_days"] * 86400
+    games = [r for r in db.execute(
+        "SELECT game_id, studio FROM games WHERE game_id IS NOT NULL AND released_at >= ? AND not_engine IS NOT ? ORDER BY game_id",
+        (window, OTHER_PROVIDER),
+    ).fetchall() if not excluded_studio(cfg, r["studio"])]
+    if not games:
+        return []
+    pos = store.meta_get(db, "sweep_pos", 0) or 0
+    pick = next((g for g in games if g["game_id"] > pos), games[0])
+    store.meta_set(db, "sweep_pos", pick["game_id"])
+    affiliates = set(store.meta_get(db, "affiliates", []))
+    out = []
+    for bet in sorted(sc.feed(cfg["tiers"]["spin_high_usd"], game_id=pick["game_id"]), key=lambda b: b.get("createdAt") or 0):
+        row = ingest(db, bet, cfg, affiliates, now)
+        if row:
+            out.append(row)
     return out
 
 
