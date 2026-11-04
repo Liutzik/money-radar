@@ -118,6 +118,14 @@ def cmd_watch(cfg, db, minutes=None):
     if reopened:
         log(f"re-checking {reopened} games that an unanswered lookup had marked 'not engine'")
     # "The Originals" catalog entries are Stake's own games mapped onto engine slugs ("dice")
+    # Until 11-04 a demo page naming the studio instead of "stake-engine" (every release since late
+    # October) was taken for another provider. Look at all of those again, once.
+    if not store.meta_get(db, "studio_provider_fix"):
+        again = db.execute("UPDATE games SET not_engine=NULL, info_at=NULL, released_at=NULL WHERE not_engine=? AND released_at IS NULL",
+                           (collect.OTHER_PROVIDER,)).rowcount
+        db.execute("DELETE FROM meta WHERE k IN ('scan_floor', 'scan_old_run')")  # date the newest games again
+        store.meta_set(db, "studio_provider_fix", int(time.time()))
+        log(f"re-checking {again} games taken for other providers")
     db.execute("UPDATE games SET not_engine=? WHERE studio='The Originals'", (collect.OTHER_PROVIDER,))
     junk = db.execute("DELETE FROM bets WHERE slug IN (SELECT slug FROM games WHERE not_engine=?)", (collect.OTHER_PROVIDER,)).rowcount
     db.commit()
@@ -310,6 +318,27 @@ def selftest():
         print(f"{'ok ' if ok else 'BAD'} game marked 'not engine' before the catalog listed it is reopened; never-answered slugs stop after {collect.PENDING_FOR // 3600}h")
         db.execute("DELETE FROM bets WHERE bet_key='g1'")
         collect._pending.clear()
+
+        # since late October demo pages name the studio, not "stake-engine", and carry no release date
+        sc.engine_games = lambda: [{"stake_com_slug": "badapple-yard", "slug": "bad-apple-yard", "id": 88, "name": "Yard",
+                                    "team_name": "Bad Apple", "team_slug": "bad-apple"}]
+        studio_page = lambda slug: {"provider": "badapple", "providerName": "Badapple", "name": "Yard", "gameId": 88, "stakeReleasedAt": None,
+                                    "tracked30": {"daily": [{"t": now - 3 * day, "bets": 4}, {"t": now - day, "bets": 2}]}}
+        sc.game_info = studio_page
+        collect.refresh_catalog(db, now, force=True)
+        yard = {"betKey": "y1", "site": "com", "username": None, "gameSlug": "badapple-yard", "currency": "usdt",
+                "amountUsd": 52000, "payoutUsd": 0, "createdAt": now - 30}
+        row = collect.ingest(db, yard, cfg, affiliates, now)
+        ok = bool(row) and round(row["age_days"]) == 3
+        sc.game_info = lambda slug: dict(studio_page(slug), name="Yard Two", gameId=89)  # not in the catalog yet
+        row2 = collect.ingest(db, dict(yard, betKey="y2", gameSlug="badapple-yard-two"), cfg, affiliates, now)
+        ok = ok and bool(row2) and row2["age_days"] is not None
+        sc.game_info = lambda slug: {"provider": "pragmatic-play", "providerName": "Pragmatic Play", "name": "Gates"}
+        ok = ok and not collect.ingest(db, dict(yard, betKey="y3", gameSlug="pragmatic-gates"), cfg, affiliates, now)
+        bad += not ok
+        print(f"{'ok ' if ok else 'BAD'} studio-named demo pages count as engine games, dated by their first bets; Pragmatic still doesn't")
+        db.execute("DELETE FROM bets WHERE bet_key IN ('y1', 'y2')")
+        sc.game_info = lambda slug: None
 
         # a $2k spin the all-Stake feed dropped is found in its game's own feed by the sweep
         dropped = {"betKey": "s1", "site": "com", "username": None, "gameSlug": "fresh-studio-new-game", "currency": "usdt",

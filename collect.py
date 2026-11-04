@@ -23,6 +23,8 @@ _unknown_since = {}  # slug -> when its demo page first failed to answer
 MAYBE_NOT = 1
 OTHER_PROVIDER = 2
 SWEEP_EVERY = 20  # seconds between per-game feed reads of the newest releases
+DISCOVER_PER_POLL = 6  # demo-page lookups of unknown slugs per poll; the rest wait their turn
+_budget = [DISCOVER_PER_POLL]
 
 
 def iso_ts(s):
@@ -36,12 +38,14 @@ def due(db, key, every, now):
 def refresh_catalog(db, now, force=False):
     """Every Stake Engine game on stake.com, so the feed's casino bets can be told apart."""
     missing_ids = db.execute("SELECT 1 FROM games WHERE catalog_slug IS NOT NULL AND engine_id IS NULL LIMIT 1").fetchone()
-    if not force and not missing_ids and not due(db, "catalog_at", CATALOG_EVERY, now):
+    if not force and not missing_ids and store.meta_get(db, "engine_studios") and not due(db, "catalog_at", CATALOG_EVERY, now):
         return 0
     games = sc.engine_games()
     for g in games:
         if g.get("stake_com_slug"):
             store.upsert_game(db, g["stake_com_slug"], catalog_slug=g["slug"], engine_id=g["id"], name=g["name"], studio=g["team_name"])
+    if games:
+        store.meta_set(db, "engine_studios", sorted({norm(g.get(k)) for g in games for k in ("team_slug", "team_name")} - {""}))
     # A game marked "not engine" without a lookup naming another provider (GRAVE DIGGER was, on
     # 10-25) is an engine game once the catalog lists it; a real other-provider answer re-marks it.
     for r in db.execute("SELECT * FROM games WHERE not_engine=? AND catalog_slug IS NOT NULL", (MAYBE_NOT,)).fetchall():
@@ -107,18 +111,41 @@ def scan_release_dates(db, cfg, now, budget):
     return done
 
 
+def engine_info(db, info):
+    """Does a demo page describe a Stake Engine game?
+
+    Older pages say provider "stake-engine". Since late October stakecruncher names the engine
+    studio instead ("badapple", "pupool-play"), so a provider matching a studio in the engine
+    catalog counts too.
+    """
+    if info.get("provider") == "stake-engine":
+        return True
+    studios = set(store.meta_get(db, "engine_studios", []) or [])
+    return bool({norm(info.get("provider")), norm(info.get("providerName"))} & studios)
+
+
+def release_time(info):
+    """Stake release time, or for pages without one (all recent releases) the first day
+    stakecruncher saw bets on the game."""
+    exact = iso_ts(info.get("stakeReleasedAt"))
+    if exact:
+        return exact
+    days = [d["t"] for d in (info.get("tracked30") or {}).get("daily") or [] if d.get("bets")]
+    return min(days) if days else None
+
+
 def ensure_game(db, g, now):
     """Fill in release time and mode prices the first time a game gets a big bet."""
     slug = g["slug"]
     if not g["released_at"] and now - (g["info_at"] or 0) >= INFO_RETRY:
         info = sc.game_info(slug) or {}
-        if info.get("provider") and info["provider"] != "stake-engine":
+        if info.get("provider") and not engine_info(db, info):
             # the engine catalog maps a few casino slugs wrongly ("dice" -> an engine "Plinko Dice")
             store.upsert_game(db, slug, not_engine=OTHER_PROVIDER, info_at=now)
         else:
             store.upsert_game(
                 db, slug, engine_slug=info.get("engineSlug") or g["engine_slug"], game_id=info.get("gameId") or g["game_id"],
-                released_at=iso_ts(info.get("stakeReleasedAt")), studio=info.get("studioName") or g["studio"], info_at=now,
+                released_at=release_time(info), studio=info.get("studioName") or g["studio"] or info.get("providerName"), info_at=now,
             )
         g = store.game(db, slug)
     if not g["modes"] and now - (g["modes_at"] or 0) >= MODES_RETRY:
@@ -171,11 +198,11 @@ def discover(db, slug, now):
     if not slug:
         return None
     info = sc.game_info(slug)
-    if info and info.get("provider") == "stake-engine":
+    if info and engine_info(db, info):
         store.upsert_game(
-            db, slug, name=info.get("name"), studio=info.get("studioName") or info.get("studio"),
+            db, slug, name=info.get("name"), studio=info.get("studioName") or info.get("studio") or info.get("providerName"),
             engine_slug=info.get("engineSlug"), game_id=info.get("gameId"),
-            released_at=iso_ts(info.get("stakeReleasedAt")), info_at=now, not_engine=0,
+            released_at=release_time(info), info_at=now, not_engine=0,
         )
     elif info and info.get("provider"):
         store.upsert_game(db, slug, name=info.get("name"), not_engine=OTHER_PROVIDER, info_at=now)
@@ -200,6 +227,10 @@ def ingest(db, bet, cfg, affiliates, now):
     slug = bet.get("gameSlug") or ""
     g = store.game(db, slug)
     if not g or (unresolved(g) and now - (g["info_at"] or 0) >= UNKNOWN_RETRY):
+        if _budget[0] <= 0:  # enough lookups this poll; try again on the next one
+            _pending.setdefault(bet["betKey"], bet)
+            return None
+        _budget[0] -= 1
         g = discover(db, slug, now)
     if unresolved(g):
         if now - _unknown_since.setdefault(slug, now) < PENDING_FOR:
@@ -270,6 +301,7 @@ def poll(db, cfg, now):
     oldest bet newer than the previous poll) is counted in meta "overflows".
     """
     affiliates = set(store.meta_get(db, "affiliates", []))
+    _budget[0] = DISCOVER_PER_POLL
     tiers = cfg["tiers"]
     bets = {}
     last = store.meta_get(db, "last_poll_at")
