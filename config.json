@@ -9,6 +9,7 @@
   "new_release_days": 14,
   "poll_seconds": 20,
   "exclude_affiliates": true,
+  "keep_affiliates": ["com:deeppockets6"],
   "alert_all_engine_games": false,
   "exclude_studios": [
     "Paperclip Gaming",

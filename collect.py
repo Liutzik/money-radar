@@ -143,6 +143,11 @@ def excluded_studio(cfg, studio):
     return norm(studio) in {norm(s) for s in cfg.get("exclude_studios", [])}
 
 
+def kept_affiliates(cfg):
+    """Partnered streamers counted anyway (config.json keep_affiliates, "site:username")."""
+    return {store.account_hash(*k.split(":", 1)) for k in cfg.get("keep_affiliates", [])}
+
+
 def same_price_blank_spin(db, slug, amount, created, window=15 * 60):
     """A blank spin at the same price on the same game just before means this one is a spin too."""
     return db.execute(
@@ -186,8 +191,10 @@ def ingest(db, bet, cfg, affiliates, now):
     amount = bet.get("amountUsd") or 0
     if amount < min(tiers["spin_high_usd"], tiers["buy_high_usd"]) or store.has_bet(db, bet["betKey"]):
         return None
-    if cfg.get("exclude_affiliates", True) and bet.get("username") and store.account_hash(bet["site"], bet["username"]) in affiliates:
-        return None
+    if cfg.get("exclude_affiliates", True) and bet.get("username"):
+        account = store.account_hash(bet["site"], bet["username"])
+        if account in affiliates and account not in kept_affiliates(cfg):
+            return None
     if bet.get("gameKind") == "original":
         return None  # Stake Originals; the engine catalog wrongly maps "dice" to an engine game
     slug = bet.get("gameSlug") or ""

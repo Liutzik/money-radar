@@ -6,7 +6,8 @@ Discord alerts the moment big money starts on a new release.
 
 It counts money, not people: no player names are stored, hidden players count the same as
 everyone else, and Stake's partnered streamers (affiliates playing on Stake's money) are
-left out. Stake's internal studios (Paperclip, Titan, Massive, Twist ...) are left out of
+left out, except those listed in `keep_affiliates` (`site:username`, still shown without a
+name). Stake's internal studios (Paperclip, Titan, Massive, Twist ...) are left out of
 everything; the list is `exclude_studios` in `config.json`.
 
 It reads every $1,000+ bet on all of Stake every 20 seconds (the feed holds about two

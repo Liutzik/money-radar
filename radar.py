@@ -219,8 +219,9 @@ def selftest():
         for g in games:
             store.upsert_game(db, g.pop("slug"), **g)
         db.commit()
-        store.meta_set(db, "affiliates", [store.account_hash("com", "partner")])
-        cfg = {"tiers": tiers, "new_release_days": 14, "exclude_affiliates": True, "exclude_studios": ["Paperclip Gaming"],
+        store.meta_set(db, "affiliates", [store.account_hash("com", "partner"), store.account_hash("com", "keptpartner")])
+        cfg = {"tiers": tiers, "new_release_days": 14, "exclude_affiliates": True, "keep_affiliates": ["com:KeptPartner"],
+               "exclude_studios": ["Paperclip Gaming"],
                "discord_whales_webhook": "W", "discord_bets_webhook": "B"}
         affiliates = set(store.meta_get(db, "affiliates"))
         for b in hist:
@@ -243,6 +244,13 @@ def selftest():
         bad += not ok
         print(f"{'ok ' if ok else 'BAD'} winning bet at the price of a blank spin just before counts as a spin: {row and row['kind']}")
         db.execute("DELETE FROM bets WHERE bet_key='a6'")
+        kept = {"betKey": "k1", "site": "com", "username": "KeptPartner", "gameSlug": "fresh-studio-new-game", "currency": "usdt",
+                "amountUsd": 55000, "payoutUsd": 0, "createdAt": now - 12}
+        row = collect.ingest(db, kept, cfg, affiliates, now)
+        ok = bool(row) and row["tier"] == "extreme" and not row["hidden"]
+        bad += not ok
+        print(f"{'ok ' if ok else 'BAD'} partnered streamer listed in keep_affiliates is counted (shown as a public player)")
+        db.execute("DELETE FROM bets WHERE bet_key='k1'")
 
         captured = []
         sent = alerts.dispatch(db, rows, cfg, now, sender=lambda url, p: captured.append((url, p)) or True)
